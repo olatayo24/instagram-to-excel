@@ -1,16 +1,16 @@
-﻿import os, json
+﻿import os
 from datetime import datetime
 from flask import Flask, request, jsonify
-from excel_writer import append_row, HEADERS, register_csv_route
+from excel_writer import append_row, register_csv_route
+from price_store import load_prices, find_price_reply
 
 def now_iso():
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 app = Flask(__name__)
-register_csv_route(app)  # exposes /export.csv for Power BI
+register_csv_route(app)  # exposes /export.csv
 
 IG_VERIFY_TOKEN = os.getenv("IG_VERIFY_TOKEN", "dev_token")
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -34,7 +34,7 @@ def receive_ig():
     except Exception:
         data = {}
 
-    # Extract common IG structure
+    # Extract basic fields from IG payload
     message_text = ""
     username = "unknown"
     ts = now_iso()
@@ -45,22 +45,28 @@ def receive_ig():
         value = changes.get("value", {}) if isinstance(changes, dict) else {}
         msgs = value.get("messages") or []
         if msgs:
-            message_text = msgs[0].get("text", "") or ""
-            ts = msgs[0].get("timestamp", ts) or ts
+            message_text = (msgs[0].get("text") or "").strip()
+            ts = (msgs[0].get("timestamp") or ts)
         from_obj = value.get("from") or {}
         username = from_obj.get("username", username)
     except Exception:
         pass
 
-    # Append to CSV (persistent disk on Render: /data/instagram_messages.csv)
+    # Load prices from Excel and compute auto-reply text
+    prices_map = load_prices()
+    reply_text = find_price_reply(message_text, prices_map)
+
+    # Log to CSV (including reply text)
     try:
         append_row({
             "timestamp": ts,
             "username": username,
-            "message": message_text.strip(),
-            "channel": "instagram"
+            "message": message_text,
+            "channel": "instagram",
+            "reply": reply_text
         })
-        return jsonify({"status": "ok"}), 200
+        # NOTE: This does NOT send a DM back yet. It only logs what we WOULD reply.
+        return jsonify({"status": "ok", "reply": reply_text}), 200
     except Exception as e:
         return jsonify({"status": "csv_write_error", "error": str(e)}), 200
 
